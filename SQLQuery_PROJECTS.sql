@@ -1,0 +1,9 @@
+-- 1. PROJECTS
+
+CREATE TABLE PROJECTT(
+	Project_ID VARCHAR(20) PRIMARY KEY,
+	Project_Name VARCHAR(150) NOT NULL,
+	Start_Date DATE,
+	End_Date DATE,
+	Status VARCHAR(30)
+);

@@ -1,0 +1,13 @@
+-- 7. DOCUMENTS
+
+CREATE TABLE DOCUMENTS(
+	Document_ID VARCHAR(20) PRIMARY KEY,
+	Activity_ID VARCHAR(20),
+	Doc_Type VARCHAR(50),
+	Title VARCHAR(150),
+	Revision VARCHAR(10),
+	Issue_Date DATE,
+	Status VARCHAR(30),
+
+	CONSTRAINT fk_documents_activity FOREIGN KEY (Activity_ID) REFERENCES WBS_ACTIVITIES (Activity_ID)
+);

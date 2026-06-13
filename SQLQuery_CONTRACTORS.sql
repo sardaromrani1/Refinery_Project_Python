@@ -1,0 +1,8 @@
+-- 3. CONTRACTORS
+
+CREATE TABLE CONTRACTORS(
+	Contractor_ID VARCHAR(20) PRIMARY KEY,
+	Contractor_Name VARCHAR(150) NOT NULL,
+	Contract_Number VARCHAR(50),
+	Performance_Rating VARCHAR(20)
+);

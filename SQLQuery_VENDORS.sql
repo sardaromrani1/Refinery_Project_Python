@@ -1,0 +1,8 @@
+-- 2. VENDORS
+
+CREATE TABLE VENDORS(
+	Vendor_ID VARCHAR(20) PRIMARY KEY,
+	Vendor_Name VARCHAR(150) NOT NULL,
+	Contact VARCHAR(150),
+	Performance_Rating VARCHAR(20)
+);
