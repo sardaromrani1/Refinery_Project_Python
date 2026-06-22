@@ -1,17 +1,27 @@
--- 6. MATERIALS
+-- MATERIALS
 
-CREATE TABLE MATERIALS(
-	Material_ID VARCHAR(20) PRIMARY KEY,
-	Activity_ID VARCHAR(20),
-	Vendor_ID VARCHAR(20),
-	Description VARCHAR(150),
-	Quantity INT,
-	PO_Number VARCHAR(50),
-	Order_Date DATE,
-	Expected_Delivery DATE,
-	Actual_Delivery DATE,
-	Status VARCHAR(30),
+CREATE TABLE MATERIALS (
+	Material_ID INT IDENTITY (1, 1) PRIMARY KEY,
+	Material_Code VARCHAR(20) NOT NULL UNIQUE,
+	Activity_ID INT NOT NULL,
+	Vendor_ID INT NULL,
+	Description VARCHAR(150) NOT NULL,
+	Unit VARCHAR(20) NOT NULL,
+	Quantity DECIMAL (12, 3) NOT NULL
+		CONSTRAINT chk_materials_qty
+			CHECK (Quantity > 0),
+	Unit_Cost DECIMAL (15, 2) NULL,
+	Delivery_Date DATE,
+	CreatedAt DATETIME2 NOT NULL DEFAULT SYSDATETIME(),
+	UpdatedAt DATETIME2 NOT NULL DEFAULT SYSDATETIME(),
 
-	CONSTRAINT fk_materials_activity FOREIGN KEY (Activity_ID) REFERENCES WBS_ACTIVITIES (Activity_ID),
-	CONSTRAINT fk_materials_vendor FOREIGN KEY (Vendor_ID) REFERENCES VENDORS (Vendor_ID)
+	CONSTRAINT fk_materials_activity
+		FOREIGN KEY (Activity_ID) REFERENCES WBS_ACTIVITIES (Activity_ID),
+
+	CONSTRAINT fk_materials_vendor 
+		FOREIGN KEY (Vendor_ID) REFERENCES VENDORS (Vendor_ID)
 );
+
+CREATE INDEX ix_materials_activity ON MATERIALS (Activity_ID);
+
+CREATE INDEX ix_materials_vendor ON MATERIALS (Vendor_ID);
