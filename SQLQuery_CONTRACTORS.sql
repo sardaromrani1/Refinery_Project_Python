@@ -1,16 +1,8 @@
--- CONTRACTORS
+-- 3. CONTRACTORS
 
-CREATE TABLE CONTRACTORS (
-	Contractor_ID INT IDENTITY(1,1) PRIMARY KEY,
-	Contractor_Code VARCHAR(20) NOT NULL UNIQUE,
+CREATE TABLE CONTRACTORS(
+	Contractor_ID VARCHAR(20) PRIMARY KEY,
 	Contractor_Name VARCHAR(150) NOT NULL,
 	Contract_Number VARCHAR(50),
-	Contract_Person VARCHAR(100),
-	Contract_Email VARCHAR(150),
-	Contract_Phone VARCHAR(30),
-	Performance_Rating DECIMAL(3,1) NULL,
-		CONSTRAINT chk_contractor_rating
-		CHECK (Performance_Rating BETWEEN 0 AND 5),
-	CreatedAt DATETIME2 NOT NULL DEFAULT SYSDATETIME(),
-	UpdatedAt DATETIME2 NOT NULL DEFAULT SYSDATETIME()
+	Performance_Rating VARCHAR(20)
 );
