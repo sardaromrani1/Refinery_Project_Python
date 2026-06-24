@@ -8,35 +8,40 @@ Sidebar navigation switches between module forms.
 import tkinter as tk
 from tkinter import messagebox
 
-from projects_form    import ProjectsForm
-from materials_form   import MaterialsForm
+from projects_form import ProjectsForm
+from materials_form import MaterialsForm
 from contractors_form import ContractorsForm
-from vendors_form     import VendorsForm
-from costs_form       import CostsForm
+from vendors_form import VendorsForm
+from costs_form import CostsForm
+from documents_form import DocumentsForm
+from equipment_form import EquipmentForm
+from inspections_form import InspectionsForm
+from permits_form import PermitsForm
+from resources_form import ResourcesForm
+from wbs_activities_form import WbsActivitiesForm
 
 
 class RefineryApp(tk.Tk):
 
-    BG      = "#1e2327"
+    BG = "#1e2327"
     SIDE_BG = "#161b1f"
-    FG      = "#e0e0e0"
-    ACCENT  = "#00b4d8"
-    SEL_BG  = "#00b4d8"
-    BTN_FG  = "#ffffff"
+    FG = "#e0e0e0"
+    ACCENT = "#00b4d8"
+    SEL_BG = "#00b4d8"
+    BTN_FG = "#ffffff"
 
     MODULES = [
-        ("Projects",    ProjectsForm),
-        ("Materials",   MaterialsForm),
+        ("Projects", ProjectsForm),
+        ("WBS Activities", WbsActivitiesForm),
+        ("Materials", MaterialsForm),
         ("Contractors", ContractorsForm),
-        ("Vendors",     VendorsForm),
-        ("Costs",       CostsForm),
-        # Add more here as you build them:
-        # ("WBS Activities", WbsForm),
-        # ("Equipment",      EquipmentForm),
-        # ("Inspections",    InspectionsForm),
-        # ("Resources",      ResourcesForm),
-        # ("Permits",        PermitsForm),
-        # ("Documents",      DocumentsForm),
+        ("Vendors", VendorsForm),
+        ("Costs", CostsForm),
+        ("Equipment", EquipmentForm),
+        ("Inspections", InspectionsForm),
+        ("Permits", PermitsForm),
+        ("Resources", ResourcesForm),
+        ("Documents", DocumentsForm),
     ]
 
     def __init__(self):
@@ -46,7 +51,7 @@ class RefineryApp(tk.Tk):
         self.minsize(950, 600)
         self.configure(bg=self.BG)
         self._current_frame = None
-        self._nav_buttons   = {}
+        self._nav_buttons = {}
         self._build_layout()
         self._load_module(self.MODULES[0])
 
