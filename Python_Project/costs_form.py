@@ -6,12 +6,12 @@ Full CRUD Tkinter form for the COSTS table in Refinery_Project.
 Table schema
 ────────────
 CREATE TABLE COSTS (
-    Cost_ID         VARCHAR(20)    PRIMARY KEY,
-    Activity_ID     VARCHAR(20),
-    Cost_Type       VARCHAR(50),
+    Cost_ID VARCHAR(20) PRIMARY KEY,
+    Activity_ID VARCHAR(20),
+    Cost_Type VARCHAR(50),
     Budgeted_Amount DECIMAL(15,2),
-    Actual_Amount   DECIMAL(15,2),
-    Date_Recorded   DATE,
+    Actual_Amount DECIMAL(15,2),
+    Date_Recorded DATE,
     CONSTRAINT fk_costs_activity FOREIGN KEY (Activity_ID)
         REFERENCES WBS_ACTIVITIES(Activity_ID)
 );
@@ -21,14 +21,23 @@ Notes
 • Cost_ID is a user-supplied VARCHAR primary key (not auto-generated).
 • Activity_ID is a FK dropdown loaded from WBS_ACTIVITIES at startup.
 • Budgeted_Amount and Actual_Amount validated as non-negative decimals.
-• Date_Recorded validated as YYYY-MM-DD.
+• Date_Recorded uses a clickable calendar (tkcalendar.DateEntry) instead of
+  free-typed text.
 • Variance (Actual - Budgeted) is calculated and shown read-only in the treeview.
+• Search bar has a "Search by" column dropdown. Text columns (Cost ID,
+  Activity ID, Cost Type) use a keyword box; Date Recorded swaps the keyword
+  box for a "From" / "To" calendar range picker.
+
+Requires the 'tkcalendar' package:
+    pip install tkcalendar
 """
 
 import tkinter as tk
 from tkinter import ttk, messagebox
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
+
+from tkcalendar import DateEntry
 
 from db_connection import get_connection
 
@@ -38,21 +47,32 @@ COST_TYPE_OPTIONS = [
 ]
 DATE_FMT = "%Y-%m-%d"
 
+# ── Search column options: display label -> actual SQL column name ──────────
+SEARCH_COLUMNS = {
+    "Cost ID": "Cost_ID",
+    "Activity ID": "Activity_ID",
+    "Cost Type": "Cost_Type",
+    "Date Recorded": "Date_Recorded",
+}
+
+# Columns that use a date-range search (From / To calendars) instead of a keyword box
+DATE_RANGE_COLUMNS = {"Date Recorded": "Date_Recorded"}
+
 
 class CostsForm(tk.Frame):
 
-    BG       = "#1e2327"
+    BG = "#1e2327"
     PANEL_BG = "#252b30"
-    FG       = "#e0e0e0"
-    ACCENT   = "#00b4d8"
-    BTN_BG   = "#00b4d8"
-    BTN_FG   = "#ffffff"
+    FG = "#e0e0e0"
+    ACCENT = "#00b4d8"
+    BTN_BG = "#00b4d8"
+    BTN_FG = "#ffffff"
     ENTRY_BG = "#2e3540"
-    SEL_BG   = "#00b4d8"
+    SEL_BG = "#00b4d8"
 
     def __init__(self, parent, *args, **kwargs):
         super().__init__(parent, bg=self.BG, *args, **kwargs)
-        self._selected_id = None        # Cost_ID of currently selected row
+        self._selected_id = None # Cost_ID of currently selected row
         self._build_ui()
         self.load_costs()
 
@@ -66,18 +86,35 @@ class CostsForm(tk.Frame):
             font=("Segoe UI", 16, "bold")
         ).pack(pady=(18, 6))
 
-        # Search bar
+        # ── Search bar (column selector + dynamic keyword/date-range area) ───
         search_frame = tk.Frame(self, bg=self.BG)
         search_frame.pack(fill=tk.X, padx=20, pady=(0, 6))
-        tk.Label(search_frame, text="Search:", bg=self.BG, fg=self.FG,
+
+        tk.Label(search_frame, text="Search by:", bg=self.BG, fg=self.FG,
                  font=("Segoe UI", 10)).pack(side=tk.LEFT, padx=(0, 6))
+
+        self.search_column_var = tk.StringVar(value="Cost ID")
+        search_column_combo = ttk.Combobox(
+            search_frame, textvariable=self.search_column_var,
+            values=list(SEARCH_COLUMNS.keys()), state="readonly",
+            font=("Segoe UI", 10), width=14
+        )
+        search_column_combo.pack(side=tk.LEFT, padx=(0, 10))
+        search_column_combo.bind("<<ComboboxSelected>>", self._on_search_column_change)
+
+        # Container that holds either the keyword Entry OR the From/To DateEntry pair.
+        self.search_input_frame = tk.Frame(search_frame, bg=self.BG)
+        self.search_input_frame.pack(side=tk.LEFT)
+
+        # Keyword search variable (used for text columns)
         self.search_var = tk.StringVar()
         self.search_var.trace_add("write", lambda *_: self.load_costs())
-        tk.Entry(
-            search_frame, textvariable=self.search_var,
-            bg=self.ENTRY_BG, fg=self.FG, insertbackground=self.FG,
-            relief=tk.FLAT, font=("Segoe UI", 10), width=30
-        ).pack(side=tk.LEFT)
+
+        self._search_keyword_entry = None
+        self._search_date_from = None
+        self._search_date_to = None
+
+        self._build_keyword_search()
 
         # Entry panel – two columns
         panel = tk.LabelFrame(
@@ -88,15 +125,15 @@ class CostsForm(tk.Frame):
 
         # Left column fields
         left_fields = [
-            ("Cost ID *",                  "entry"),
-            ("Activity ID",                "combo_db"),   # FK from WBS_ACTIVITIES
-            ("Cost Type",                  "combo"),
+            ("Cost ID *", "entry"),
+            ("Activity ID", "combo_db"), # FK from WBS_ACTIVITIES
+            ("Cost Type", "combo"),
         ]
         # Right column fields
         right_fields = [
-            ("Budgeted Amount",            "entry"),
-            ("Actual Amount",              "entry"),
-            ("Date Recorded (YYYY-MM-DD)", "entry"),
+            ("Budgeted Amount", "entry"),
+            ("Actual Amount", "entry"),
+            ("Date Recorded", "date"),
         ]
 
         self._entries = {}
@@ -119,6 +156,17 @@ class CostsForm(tk.Frame):
                         panel, values=[], state="readonly",
                         font=("Segoe UI", 10), width=22
                     )
+                elif wtype == "date":
+                    # Calendar date picker. date_pattern controls the .get() string format.
+                    widget = DateEntry(
+                        panel, date_pattern="yyyy-mm-dd",
+                        font=("Segoe UI", 10), width=21,
+                        background=self.ACCENT, foreground="#ffffff",
+                        borderwidth=0, state="readonly"
+                    )
+                    # Blank by default — DateEntry defaults to "today"; the date
+                    # is optional at record-creation time.
+                    widget.delete(0, tk.END)
                 else:
                     widget = tk.Entry(
                         panel, bg=self.ENTRY_BG, fg=self.FG,
@@ -136,11 +184,11 @@ class CostsForm(tk.Frame):
         btn_frame = tk.Frame(self, bg=self.BG)
         btn_frame.pack(pady=8)
         for text, cmd in [
-            ("➕ Add",    self.add_cost),
-            ("✏️ Update",  self.update_cost),
-            ("🗑️ Delete",  self.delete_cost),
+            ("➕ Add", self.add_cost),
+            ("✏️ Update", self.update_cost),
+            ("🗑️ Delete", self.delete_cost),
             ("🔄 Refresh", self.load_costs),
-            ("✖ Clear",   self.clear_fields),
+            ("✖ Clear", self.clear_fields),
         ]:
             tk.Button(
                 btn_frame, text=text, command=cmd,
@@ -190,10 +238,83 @@ class CostsForm(tk.Frame):
 
         self.tree.bind("<<TreeviewSelect>>", self._on_row_select)
 
+    # ── Search-input builders ──────────────────────────────────────────────
+    def _clear_search_input_frame(self):
+        for child in self.search_input_frame.winfo_children():
+            child.destroy()
+        self._search_keyword_entry = None
+        self._search_date_from = None
+        self._search_date_to = None
+
+    def _build_keyword_search(self):
+        """Show a single keyword Entry (used for Cost ID / Activity ID / Cost Type)."""
+        self._clear_search_input_frame()
+
+        tk.Label(self.search_input_frame, text="Keyword:", bg=self.BG, fg=self.FG,
+                 font=("Segoe UI", 10)).pack(side=tk.LEFT, padx=(0, 6))
+
+        self.search_var.set("") # reset previous keyword
+        self._search_keyword_entry = tk.Entry(
+            self.search_input_frame, textvariable=self.search_var,
+            bg=self.ENTRY_BG, fg=self.FG, insertbackground=self.FG,
+            relief=tk.FLAT, font=("Segoe UI", 10), width=30
+        )
+        self._search_keyword_entry.pack(side=tk.LEFT)
+
+    def _build_date_range_search(self):
+        """Show two calendar pickers: 'From' and 'To' (used for Date Recorded search)."""
+        self._clear_search_input_frame()
+
+        tk.Label(self.search_input_frame, text="From:", bg=self.BG, fg=self.FG,
+                 font=("Segoe UI", 10)).pack(side=tk.LEFT, padx=(0, 6))
+        self._search_date_from = DateEntry(
+            self.search_input_frame, date_pattern="yyyy-mm-dd",
+            font=("Segoe UI", 10), width=12,
+            background=self.ACCENT, foreground="#ffffff",
+            borderwidth=0, state="readonly"
+        )
+        self._search_date_from.delete(0, tk.END) # start blank
+        self._search_date_from.pack(side=tk.LEFT, padx=(0, 10))
+        self._search_date_from.bind("<<DateEntrySelected>>", lambda _e: self.load_costs())
+
+        tk.Label(self.search_input_frame, text="To:", bg=self.BG, fg=self.FG,
+                 font=("Segoe UI", 10)).pack(side=tk.LEFT, padx=(0, 6))
+        self._search_date_to = DateEntry(
+            self.search_input_frame, date_pattern="yyyy-mm-dd",
+            font=("Segoe UI", 10), width=12,
+            background=self.ACCENT, foreground="#ffffff",
+            borderwidth=0, state="readonly"
+        )
+        self._search_date_to.delete(0, tk.END) # start blank
+        self._search_date_to.pack(side=tk.LEFT)
+        self._search_date_to.bind("<<DateEntrySelected>>", lambda _e: self.load_costs())
+
+        # Small "Clear dates" button so the user can reset without retyping
+        tk.Button(
+            self.search_input_frame, text="✖", command=self._clear_date_range,
+            bg=self.BTN_BG, fg=self.BTN_FG, activebackground="#0096c7",
+            relief=tk.FLAT, font=("Segoe UI", 9, "bold"), width=2, cursor="hand2"
+        ).pack(side=tk.LEFT, padx=(8, 0))
+
+    def _clear_date_range(self):
+        if self._search_date_from is not None:
+            self._search_date_from.delete(0, tk.END)
+        if self._search_date_to is not None:
+            self._search_date_to.delete(0, tk.END)
+        self.load_costs()
+
+    def _on_search_column_change(self, _event=None):
+        column_label = self.search_column_var.get()
+        if column_label in DATE_RANGE_COLUMNS:
+            self._build_date_range_search()
+        else:
+            self._build_keyword_search()
+        self.load_costs()
+
     # ── FK dropdown loader ────────────────────────────────────────────────────
     def _load_activity_ids(self):
         try:
-            conn   = get_connection()
+            conn = get_connection()
             cursor = conn.cursor()
             cursor.execute(
                 "SELECT Activity_ID FROM WBS_ACTIVITIES ORDER BY Activity_ID"
@@ -204,7 +325,7 @@ class CostsForm(tk.Frame):
             if ids:
                 self._entries["Activity ID"].set(ids[0])
         except Exception:
-            pass    # table may not exist yet; leave dropdown empty
+            pass # table may not exist yet; leave dropdown empty
 
     # ── Helpers ───────────────────────────────────────────────────────────────
     def _get(self, label: str) -> str:
@@ -227,7 +348,7 @@ class CostsForm(tk.Frame):
                 "Validation",
                 f"'{label}' must be a non-negative number (e.g. 12500.00)."
             )
-            return False    # sentinel – distinct from None
+            return False # sentinel – distinct from None
 
     def _validate_inputs(self) -> bool:
         if not self._get("Cost ID *"):
@@ -239,7 +360,9 @@ class CostsForm(tk.Frame):
             if result is False:
                 return False
 
-        date_val = self._get("Date Recorded (YYYY-MM-DD)")
+        # DateEntry already enforces yyyy-mm-dd formatting via the calendar,
+        # but we still guard against a manually-cleared/blank field here.
+        date_val = self._get("Date Recorded")
         if date_val:
             try:
                 datetime.strptime(date_val, DATE_FMT)
@@ -262,6 +385,13 @@ class CostsForm(tk.Frame):
                 widget.delete(0, tk.END)
         self.tree.selection_remove(self.tree.selection())
 
+    def _set_date_field(self, label: str, value):
+        """Set a DateEntry field's text directly (value may be a date string or empty)."""
+        widget = self._entries[label]
+        widget.delete(0, tk.END)
+        if value:
+            widget.insert(0, value)
+
     def _on_row_select(self, _event=None):
         selected = self.tree.selection()
         if not selected:
@@ -270,22 +400,21 @@ class CostsForm(tk.Frame):
         # v = (Cost_ID, Activity_ID, Cost_Type, Budgeted, Actual, Variance, Date_Recorded)
         self._selected_id = v[0]
 
-        mapping = {
-            "Cost ID *":                   v[0],
-            "Activity ID":                 v[1],
-            "Cost Type":                   v[2],
-            "Budgeted Amount":             v[3],
-            "Actual Amount":               v[4],
-            # Variance is computed – not editable
-            "Date Recorded (YYYY-MM-DD)":  v[6],
-        }
-        for lbl, val in mapping.items():
-            w = self._entries[lbl]
-            if isinstance(w, ttk.Combobox):
-                w.set(val or "")
-            else:
-                w.delete(0, tk.END)
-                w.insert(0, val or "")
+        self._entries["Cost ID *"].delete(0, tk.END)
+        self._entries["Cost ID *"].insert(0, v[0] or "")
+
+        self._entries["Activity ID"].set(v[1] or "")
+        self._entries["Cost Type"].set(v[2] or COST_TYPE_OPTIONS[0])
+
+        self._entries["Budgeted Amount"].delete(0, tk.END)
+        self._entries["Budgeted Amount"].insert(0, v[3] or "")
+
+        self._entries["Actual Amount"].delete(0, tk.END)
+        self._entries["Actual Amount"].insert(0, v[4] or "")
+
+        # v[5] is the computed, read-only Variance column — not editable, skip.
+
+        self._set_date_field("Date Recorded", v[6] if v[6] else "")
 
     def _sort_tree(self, col: str, reverse: bool):
         data = [(self.tree.set(k, col), k) for k in self.tree.get_children("")]
@@ -310,33 +439,66 @@ class CostsForm(tk.Frame):
 
     # ── CRUD ──────────────────────────────────────────────────────────────────
     def load_costs(self, *_):
+        """Read costs, filtered by the selected search column, into the treeview.
+
+        Text columns (Cost ID / Activity ID / Cost Type) use a keyword LIKE
+        search. Date Recorded uses a From/To range search.
+        """
         for row in self.tree.get_children():
             self.tree.delete(row)
 
-        keyword = self.search_var.get().strip()
-        try:
-            conn   = get_connection()
-            cursor = conn.cursor()
-            if keyword:
-                cursor.execute(
-                    "SELECT Cost_ID, Activity_ID, Cost_Type, "
-                    "Budgeted_Amount, Actual_Amount, Date_Recorded "
-                    "FROM COSTS "
-                    "WHERE Cost_ID LIKE ? OR Activity_ID LIKE ? "
-                    "   OR Cost_Type LIKE ? "
-                    "ORDER BY Cost_ID",
-                    (f"%{keyword}%",) * 3
-                )
-            else:
-                cursor.execute(
-                    "SELECT Cost_ID, Activity_ID, Cost_Type, "
-                    "Budgeted_Amount, Actual_Amount, Date_Recorded "
-                    "FROM COSTS ORDER BY Cost_ID"
-                )
+        column_label = self.search_column_var.get()
+        sql_column = SEARCH_COLUMNS.get(column_label, "Cost_ID")
+        keyword_active = False
 
-            for row in cursor.fetchall():
+        try:
+            conn = get_connection()
+            cursor = conn.cursor()
+
+            if column_label in DATE_RANGE_COLUMNS:
+                date_from = self._search_date_from.get().strip() if self._search_date_from else ""
+                date_to = self._search_date_to.get().strip() if self._search_date_to else ""
+
+                conditions, params = [], []
+                if date_from:
+                    conditions.append(f"{sql_column} >= ?")
+                    params.append(date_from)
+                if date_to:
+                    conditions.append(f"{sql_column} <= ?")
+                    params.append(date_to)
+
+                where_clause = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+                cursor.execute(
+                    "SELECT Cost_ID, Activity_ID, Cost_Type, "
+                    "Budgeted_Amount, Actual_Amount, Date_Recorded "
+                    "FROM COSTS" + where_clause + " ORDER BY Cost_ID",
+                    params
+                )
+                keyword_active = bool(conditions)
+
+            else:
+                keyword = self.search_var.get().strip()
+                keyword_active = bool(keyword)
+
+                if keyword:
+                    cursor.execute(
+                        f"SELECT Cost_ID, Activity_ID, Cost_Type, "
+                        f"Budgeted_Amount, Actual_Amount, Date_Recorded "
+                        f"FROM COSTS WHERE {sql_column} LIKE ? "
+                        f"ORDER BY Cost_ID",
+                        (f"%{keyword}%",)
+                    )
+                else:
+                    cursor.execute(
+                        "SELECT Cost_ID, Activity_ID, Cost_Type, "
+                        "Budgeted_Amount, Actual_Amount, Date_Recorded "
+                        "FROM COSTS ORDER BY Cost_ID"
+                    )
+
+            rows = cursor.fetchall()
+            for row in rows:
                 budgeted = self._fmt_decimal(row[3])
-                actual   = self._fmt_decimal(row[4])
+                actual = self._fmt_decimal(row[4])
                 # Variance = Actual - Budgeted
                 try:
                     variance = f"{Decimal(str(row[4] or 0)) - Decimal(str(row[3] or 0)):.2f}"
@@ -345,15 +507,18 @@ class CostsForm(tk.Frame):
                 date_val = str(row[5])[:10] if row[5] else ""
 
                 self.tree.insert("", tk.END, values=(
-                    row[0] or "",   # Cost_ID
-                    row[1] or "",   # Activity_ID
-                    row[2] or "",   # Cost_Type
+                    row[0] or "", # Cost_ID
+                    row[1] or "", # Activity_ID
+                    row[2] or "", # Cost_Type
                     budgeted,
                     actual,
                     variance,
                     date_val,
                 ))
             conn.close()
+
+            if keyword_active and not rows:
+                messagebox.showinfo("Search", "No cost records matched your search criteria.")
 
         except Exception as exc:
             messagebox.showerror("Database Error",
@@ -363,18 +528,18 @@ class CostsForm(tk.Frame):
         if not self._validate_inputs():
             return
 
-        cost_id  = self._get("Cost ID *")
-        act_id   = self._none_if_empty(self._get("Activity ID"))
+        cost_id = self._get("Cost ID *")
+        act_id = self._none_if_empty(self._get("Activity ID"))
         cost_type= self._none_if_empty(self._get("Cost Type"))
         budgeted = self._parse_decimal(self._get("Budgeted Amount"), "Budgeted Amount")
-        actual   = self._parse_decimal(self._get("Actual Amount"),   "Actual Amount")
-        date_rec = self._none_if_empty(self._get("Date Recorded (YYYY-MM-DD)"))
+        actual = self._parse_decimal(self._get("Actual Amount"), "Actual Amount")
+        date_rec = self._none_if_empty(self._get("Date Recorded"))
 
         if budgeted is False or actual is False:
             return
 
         try:
-            conn   = get_connection()
+            conn = get_connection()
             cursor = conn.cursor()
             cursor.execute(
                 "INSERT INTO COSTS "
@@ -383,7 +548,7 @@ class CostsForm(tk.Frame):
                 "VALUES (?, ?, ?, ?, ?, ?)",
                 (cost_id, act_id, cost_type,
                  float(budgeted) if budgeted is not None else None,
-                 float(actual)   if actual   is not None else None,
+                 float(actual) if actual is not None else None,
                  date_rec)
             )
             conn.commit()
@@ -405,11 +570,11 @@ class CostsForm(tk.Frame):
         if not self._validate_inputs():
             return
 
-        act_id   = self._none_if_empty(self._get("Activity ID"))
+        act_id = self._none_if_empty(self._get("Activity ID"))
         cost_type= self._none_if_empty(self._get("Cost Type"))
         budgeted = self._parse_decimal(self._get("Budgeted Amount"), "Budgeted Amount")
-        actual   = self._parse_decimal(self._get("Actual Amount"),   "Actual Amount")
-        date_rec = self._none_if_empty(self._get("Date Recorded (YYYY-MM-DD)"))
+        actual = self._parse_decimal(self._get("Actual Amount"), "Actual Amount")
+        date_rec = self._none_if_empty(self._get("Date Recorded"))
 
         if budgeted is False or actual is False:
             return
@@ -419,7 +584,7 @@ class CostsForm(tk.Frame):
             return
 
         try:
-            conn   = get_connection()
+            conn = get_connection()
             cursor = conn.cursor()
             cursor.execute(
                 "UPDATE COSTS SET "
@@ -428,7 +593,7 @@ class CostsForm(tk.Frame):
                 "WHERE Cost_ID=?",
                 (act_id, cost_type,
                  float(budgeted) if budgeted is not None else None,
-                 float(actual)   if actual   is not None else None,
+                 float(actual) if actual is not None else None,
                  date_rec, self._selected_id)
             )
             conn.commit()
@@ -454,7 +619,7 @@ class CostsForm(tk.Frame):
             return
 
         try:
-            conn   = get_connection()
+            conn = get_connection()
             cursor = conn.cursor()
             cursor.execute("DELETE FROM COSTS WHERE Cost_ID=?",
                            (self._selected_id,))
@@ -473,7 +638,7 @@ class CostsForm(tk.Frame):
 if __name__ == "__main__":
     root = tk.Tk()
     root.title("Refinery Project – Costs Form")
-    root.geometry("980x620")
+    root.geometry("1000x640")
     root.configure(bg="#1e2327")
     CostsForm(root)
     root.mainloop()

@@ -7,15 +7,15 @@ This is the central table linking every other module to the project schedule.
 Table schema
 ────────────
 CREATE TABLE WBS_ACTIVITIES(
-    Activity_ID       VARCHAR(20) PRIMARY KEY,
-    Project_ID        INT NOT NULL,
-    Activity_Name     VARCHAR(150) NOT NULL,
-    Planned_Start     DATE,
-    Planned_Finish    DATE,
-    Actual_Start      DATE,
-    Actual_Finish     DATE,
-    Percent_Complete  DECIMAL(5, 2) DEFAULT 0,
-    Predecessor_ID    VARCHAR(20),
+    Activity_ID VARCHAR(20) PRIMARY KEY,
+    Project_ID INT NOT NULL,
+    Activity_Name VARCHAR(150) NOT NULL,
+    Planned_Start DATE,
+    Planned_Finish DATE,
+    Actual_Start DATE,
+    Actual_Finish DATE,
+    Percent_Complete DECIMAL(5, 2) DEFAULT 0,
+    Predecessor_ID VARCHAR(20),
 
     CONSTRAINT fk_wbs_project FOREIGN KEY (Project_ID)
         REFERENCES dbo.PROJECTT (Project_ID),
@@ -34,38 +34,73 @@ Notes
   row, that row is excluded from its own Predecessor list to prevent an
   activity from being its own predecessor.
 • Percent_Complete is validated as a number between 0 and 100.
+• Planned_Start / Planned_Finish / Actual_Start / Actual_Finish use a
+  clickable calendar (tkcalendar.DateEntry) instead of free-typed text.
+• Search bar has a "Search by" column dropdown. Text columns (Activity_ID,
+  Activity_Name) use a keyword box; each of the 4 date columns swaps the
+  keyword box for a "From" / "To" calendar range picker.
+
+Requires the 'tkcalendar' package:
+    pip install tkcalendar
 """
 
 import tkinter as tk
 from tkinter import ttk, messagebox
 from datetime import datetime
 
+from tkcalendar import DateEntry
+
 from db_connection import get_connection
 
 DATE_FMT = "%Y-%m-%d"
+
+# ── Search column options: display label -> actual SQL column name ──────────
+SEARCH_COLUMNS = {
+    "Activity ID": "Activity_ID",
+    "Activity Name": "Activity_Name",
+    "Planned Start": "Planned_Start",
+    "Planned Finish": "Planned_Finish",
+    "Actual Start": "Actual_Start",
+    "Actual Finish": "Actual_Finish",
+}
+
+# Columns that use a date-range search (From / To calendars) instead of a keyword box
+DATE_RANGE_COLUMNS = {
+    "Planned Start": "Planned_Start",
+    "Planned Finish": "Planned_Finish",
+    "Actual Start": "Actual_Start",
+    "Actual Finish": "Actual_Finish",
+}
+
+# The 4 date-field labels used in the details panel (for building DateEntry widgets)
+DATE_FIELD_LABELS = (
+    "Planned_Start", "Planned_Finish", "Actual_Start", "Actual_Finish"
+)
 
 
 # ────────────────────────────────────────────────────────────────────────────
 class WbsActivitiesForm(tk.Frame):
     """
     Dark-themed frame with:
-      • A data-entry panel (top)
+      • A data-entry panel (top) with calendar date pickers
       • CRUD buttons
       • A searchable, sortable Treeview listing all WBS activities
+      • Column-scoped search: keyword search for text columns, date-range
+        search (From/To calendars) for each of the 4 date columns
     """
 
-    BG       = "#1e2327"
+    BG = "#1e2327"
     PANEL_BG = "#252b30"
-    FG       = "#e0e0e0"
-    ACCENT   = "#00b4d8"
-    BTN_BG   = "#00b4d8"
-    BTN_FG   = "#ffffff"
+    FG = "#e0e0e0"
+    ACCENT = "#00b4d8"
+    BTN_BG = "#00b4d8"
+    BTN_FG = "#ffffff"
     ENTRY_BG = "#2e3540"
-    SEL_BG   = "#00b4d8"
+    SEL_BG = "#00b4d8"
 
     def __init__(self, parent, *args, **kwargs):
         super().__init__(parent, bg=self.BG, *args, **kwargs)
-        self._selected_id = None          # Activity_ID of the currently selected row
+        self._selected_id = None # Activity_ID of the currently selected row
         self._project_display_to_id = {}
         self._project_id_to_display = {}
         self._activity_display_to_id = {}
@@ -84,19 +119,35 @@ class WbsActivitiesForm(tk.Frame):
             font=("Segoe UI", 16, "bold")
         ).pack(pady=(18, 6))
 
-        # ── Search bar ────────────────────────────────────────────────────────
+        # ── Search bar (column selector + dynamic keyword/date-range area) ───
         search_frame = tk.Frame(self, bg=self.BG)
         search_frame.pack(fill=tk.X, padx=20, pady=(0, 6))
 
-        tk.Label(search_frame, text="Search:", bg=self.BG, fg=self.FG,
+        tk.Label(search_frame, text="Search by:", bg=self.BG, fg=self.FG,
                  font=("Segoe UI", 10)).pack(side=tk.LEFT, padx=(0, 6))
+
+        self.search_column_var = tk.StringVar(value="Activity Name")
+        search_column_combo = ttk.Combobox(
+            search_frame, textvariable=self.search_column_var,
+            values=list(SEARCH_COLUMNS.keys()), state="readonly",
+            font=("Segoe UI", 10), width=15
+        )
+        search_column_combo.pack(side=tk.LEFT, padx=(0, 10))
+        search_column_combo.bind("<<ComboboxSelected>>", self._on_search_column_change)
+
+        # Container that holds either the keyword Entry OR the From/To DateEntry pair.
+        self.search_input_frame = tk.Frame(search_frame, bg=self.BG)
+        self.search_input_frame.pack(side=tk.LEFT)
+
+        # Keyword search variable (used for text columns: Activity_ID, Activity_Name)
         self.search_var = tk.StringVar()
         self.search_var.trace_add("write", lambda *_: self.load_activities())
-        tk.Entry(
-            search_frame, textvariable=self.search_var,
-            bg=self.ENTRY_BG, fg=self.FG, insertbackground=self.FG,
-            relief=tk.FLAT, font=("Segoe UI", 10), width=30
-        ).pack(side=tk.LEFT)
+
+        self._search_keyword_entry = None
+        self._search_date_from = None
+        self._search_date_to = None
+
+        self._build_keyword_search()
 
         # ── Entry panel ───────────────────────────────────────────────────────
         panel = tk.LabelFrame(
@@ -108,17 +159,17 @@ class WbsActivitiesForm(tk.Frame):
         self._entries = {}
 
         col0_fields = [
-            ("Activity_ID *",   "entry"),
-            ("Project_ID *",    "fk_project"),
+            ("Activity_ID *", "entry"),
+            ("Project_ID *", "fk_project"),
             ("Activity_Name *", "entry"),
-            ("Predecessor_ID",  "fk_predecessor"),
+            ("Predecessor_ID", "fk_predecessor"),
             ("Percent_Complete (0-100)", "entry"),
         ]
         col1_fields = [
-            ("Planned_Start (YYYY-MM-DD)",  "entry"),
-            ("Planned_Finish (YYYY-MM-DD)", "entry"),
-            ("Actual_Start (YYYY-MM-DD)",   "entry"),
-            ("Actual_Finish (YYYY-MM-DD)",  "entry"),
+            ("Planned_Start", "date"),
+            ("Planned_Finish", "date"),
+            ("Actual_Start", "date"),
+            ("Actual_Finish", "date"),
         ]
 
         for i, (lbl, kind) in enumerate(col0_fields):
@@ -131,11 +182,11 @@ class WbsActivitiesForm(tk.Frame):
         btn_frame.pack(pady=8)
 
         buttons = [
-            ("➕ Add",     self.add_activity),
-            ("✏️ Update",  self.update_activity),
-            ("🗑️ Delete",  self.delete_activity),
+            ("➕ Add", self.add_activity),
+            ("✏️ Update", self.update_activity),
+            ("🗑️ Delete", self.delete_activity),
             ("🔄 Refresh", self._refresh_all),
-            ("✖ Clear",   self.clear_fields),
+            ("✖ Clear", self.clear_fields),
         ]
         for text, cmd in buttons:
             tk.Button(
@@ -197,11 +248,95 @@ class WbsActivitiesForm(tk.Frame):
             widget = ttk.Combobox(panel, values=[""], state="readonly",
                                   font=("Segoe UI", 10), width=26)
             widget.set("")
+        elif kind == "date":
+            # Calendar date picker. date_pattern controls the .get() string format.
+            widget = DateEntry(
+                panel, date_pattern="yyyy-mm-dd",
+                font=("Segoe UI", 10), width=25,
+                background=self.ACCENT, foreground="#ffffff",
+                borderwidth=0, state="readonly"
+            )
+            # Blank by default — DateEntry defaults to "today"; these dates are
+            # optional (esp. Actual_Start/Finish before work has begun).
+            widget.delete(0, tk.END)
         else:
             raise ValueError(f"Unknown field kind: {kind}")
 
         widget.grid(row=row, column=col + 1, padx=14, pady=5, sticky="w")
         self._entries[label] = widget
+
+    # ── Search-input builders ──────────────────────────────────────────────
+    def _clear_search_input_frame(self):
+        for child in self.search_input_frame.winfo_children():
+            child.destroy()
+        self._search_keyword_entry = None
+        self._search_date_from = None
+        self._search_date_to = None
+
+    def _build_keyword_search(self):
+        """Show a single keyword Entry (used for Activity_ID / Activity_Name search)."""
+        self._clear_search_input_frame()
+
+        tk.Label(self.search_input_frame, text="Keyword:", bg=self.BG, fg=self.FG,
+                 font=("Segoe UI", 10)).pack(side=tk.LEFT, padx=(0, 6))
+
+        self.search_var.set("") # reset previous keyword
+        self._search_keyword_entry = tk.Entry(
+            self.search_input_frame, textvariable=self.search_var,
+            bg=self.ENTRY_BG, fg=self.FG, insertbackground=self.FG,
+            relief=tk.FLAT, font=("Segoe UI", 10), width=30
+        )
+        self._search_keyword_entry.pack(side=tk.LEFT)
+
+    def _build_date_range_search(self):
+        """Show two calendar pickers: 'From' and 'To' (used for date-column search)."""
+        self._clear_search_input_frame()
+
+        tk.Label(self.search_input_frame, text="From:", bg=self.BG, fg=self.FG,
+                 font=("Segoe UI", 10)).pack(side=tk.LEFT, padx=(0, 6))
+        self._search_date_from = DateEntry(
+            self.search_input_frame, date_pattern="yyyy-mm-dd",
+            font=("Segoe UI", 10), width=12,
+            background=self.ACCENT, foreground="#ffffff",
+            borderwidth=0, state="readonly"
+        )
+        self._search_date_from.delete(0, tk.END) # start blank
+        self._search_date_from.pack(side=tk.LEFT, padx=(0, 10))
+        self._search_date_from.bind("<<DateEntrySelected>>", lambda _e: self.load_activities())
+
+        tk.Label(self.search_input_frame, text="To:", bg=self.BG, fg=self.FG,
+                 font=("Segoe UI", 10)).pack(side=tk.LEFT, padx=(0, 6))
+        self._search_date_to = DateEntry(
+            self.search_input_frame, date_pattern="yyyy-mm-dd",
+            font=("Segoe UI", 10), width=12,
+            background=self.ACCENT, foreground="#ffffff",
+            borderwidth=0, state="readonly"
+        )
+        self._search_date_to.delete(0, tk.END) # start blank
+        self._search_date_to.pack(side=tk.LEFT)
+        self._search_date_to.bind("<<DateEntrySelected>>", lambda _e: self.load_activities())
+
+        # Small "Clear dates" button so the user can reset without retyping
+        tk.Button(
+            self.search_input_frame, text="✖", command=self._clear_date_range,
+            bg=self.BTN_BG, fg=self.BTN_FG, activebackground="#0096c7",
+            relief=tk.FLAT, font=("Segoe UI", 9, "bold"), width=2, cursor="hand2"
+        ).pack(side=tk.LEFT, padx=(8, 0))
+
+    def _clear_date_range(self):
+        if self._search_date_from is not None:
+            self._search_date_from.delete(0, tk.END)
+        if self._search_date_to is not None:
+            self._search_date_to.delete(0, tk.END)
+        self.load_activities()
+
+    def _on_search_column_change(self, _event=None):
+        column_label = self.search_column_var.get()
+        if column_label in DATE_RANGE_COLUMNS:
+            self._build_date_range_search()
+        else:
+            self._build_keyword_search()
+        self.load_activities()
 
     # ── FK loading ───────────────────────────────────────────────────────────
     def _refresh_project_options(self):
@@ -251,7 +386,7 @@ class WbsActivitiesForm(tk.Frame):
         values = [""]
         for r in rows:
             if self._selected_id is not None and r[0] == self._selected_id:
-                continue  # skip self
+                continue # skip self
             display = f"{r[0]} - {r[1]}"
             self._activity_display_to_id[display] = r[0]
             self._activity_id_to_display[r[0]] = display
@@ -294,8 +429,9 @@ class WbsActivitiesForm(tk.Frame):
             messagebox.showwarning("Validation", "Project_ID is required.")
             return False
 
-        for lbl in ("Planned_Start (YYYY-MM-DD)", "Planned_Finish (YYYY-MM-DD)",
-                    "Actual_Start (YYYY-MM-DD)", "Actual_Finish (YYYY-MM-DD)"):
+        # DateEntry already enforces yyyy-mm-dd formatting via the calendar,
+        # but we still guard against a manually-cleared/blank field here.
+        for lbl in DATE_FIELD_LABELS:
             val = self._get_field(lbl)
             if val:
                 try:
@@ -307,14 +443,14 @@ class WbsActivitiesForm(tk.Frame):
                     )
                     return False
 
-        p_start = self._get_field("Planned_Start (YYYY-MM-DD)")
-        p_finish = self._get_field("Planned_Finish (YYYY-MM-DD)")
+        p_start = self._get_field("Planned_Start")
+        p_finish = self._get_field("Planned_Finish")
         if p_start and p_finish and p_start > p_finish:
             messagebox.showwarning("Validation", "Planned Start cannot be after Planned Finish.")
             return False
 
-        a_start = self._get_field("Actual_Start (YYYY-MM-DD)")
-        a_finish = self._get_field("Actual_Finish (YYYY-MM-DD)")
+        a_start = self._get_field("Actual_Start")
+        a_finish = self._get_field("Actual_Finish")
         if a_start and a_finish and a_start > a_finish:
             messagebox.showwarning("Validation", "Actual Start cannot be after Actual Finish.")
             return False
@@ -344,7 +480,14 @@ class WbsActivitiesForm(tk.Frame):
             else:
                 widget.delete(0, tk.END)
         self.tree.selection_remove(self.tree.selection())
-        self._refresh_predecessor_options()  # un-exclude any previously selected row
+        self._refresh_predecessor_options() # un-exclude any previously selected row
+
+    def _set_date_field(self, label: str, value):
+        """Set a DateEntry field's text directly (value may be a date string or empty)."""
+        widget = self._entries[label]
+        widget.delete(0, tk.END)
+        if value:
+            widget.insert(0, value)
 
     def _on_row_select(self, _event=None):
         selected = self.tree.selection()
@@ -352,10 +495,10 @@ class WbsActivitiesForm(tk.Frame):
             return
         values = self.tree.item(selected[0], "values")
         # values = (Activity_ID, Project_ID, Activity_Name, Planned_Start,
-        #           Planned_Finish, Actual_Start, Actual_Finish,
-        #           Percent_Complete, Predecessor_ID)
+        # Planned_Finish, Actual_Start, Actual_Finish,
+        # Percent_Complete, Predecessor_ID)
         self._selected_id = values[0]
-        self._refresh_predecessor_options()  # exclude self from predecessor list
+        self._refresh_predecessor_options() # exclude self from predecessor list
 
         self._entries["Activity_ID *"].configure(state="normal")
         self._entries["Activity_ID *"].delete(0, tk.END)
@@ -370,17 +513,10 @@ class WbsActivitiesForm(tk.Frame):
         self._entries["Activity_Name *"].delete(0, tk.END)
         self._entries["Activity_Name *"].insert(0, values[2])
 
-        self._entries["Planned_Start (YYYY-MM-DD)"].delete(0, tk.END)
-        self._entries["Planned_Start (YYYY-MM-DD)"].insert(0, values[3] if values[3] else "")
-
-        self._entries["Planned_Finish (YYYY-MM-DD)"].delete(0, tk.END)
-        self._entries["Planned_Finish (YYYY-MM-DD)"].insert(0, values[4] if values[4] else "")
-
-        self._entries["Actual_Start (YYYY-MM-DD)"].delete(0, tk.END)
-        self._entries["Actual_Start (YYYY-MM-DD)"].insert(0, values[5] if values[5] else "")
-
-        self._entries["Actual_Finish (YYYY-MM-DD)"].delete(0, tk.END)
-        self._entries["Actual_Finish (YYYY-MM-DD)"].insert(0, values[6] if values[6] else "")
+        self._set_date_field("Planned_Start", values[3] if values[3] else "")
+        self._set_date_field("Planned_Finish", values[4] if values[4] else "")
+        self._set_date_field("Actual_Start", values[5] if values[5] else "")
+        self._set_date_field("Actual_Finish", values[6] if values[6] else "")
 
         self._entries["Percent_Complete (0-100)"].delete(0, tk.END)
         self._entries["Percent_Complete (0-100)"].insert(0, values[7] if values[7] else "0")
@@ -399,42 +535,80 @@ class WbsActivitiesForm(tk.Frame):
 
     # ── CRUD ──────────────────────────────────────────────────────────────────
     def load_activities(self, *_):
+        """Read WBS activities, filtered by the selected search column, into the treeview.
+
+        Text columns (Activity_ID / Activity_Name) use a keyword LIKE search.
+        Date columns (Planned/Actual Start/Finish) use a From/To range search.
+        """
         for row in self.tree.get_children():
             self.tree.delete(row)
 
-        keyword = self.search_var.get().strip()
+        column_label = self.search_column_var.get()
+        sql_column = SEARCH_COLUMNS.get(column_label, "Activity_Name")
+        keyword_active = False
+
         try:
-            conn   = get_connection()
+            conn = get_connection()
             cursor = conn.cursor()
 
-            if keyword:
-                cursor.execute(
-                    "SELECT Activity_ID, Project_ID, Activity_Name, Planned_Start, "
-                    "Planned_Finish, Actual_Start, Actual_Finish, Percent_Complete, "
-                    "Predecessor_ID FROM WBS_ACTIVITIES "
-                    "WHERE Activity_Name LIKE ? OR Activity_ID LIKE ? "
-                    "ORDER BY Activity_ID",
-                    (f"%{keyword}%", f"%{keyword}%")
-                )
-            else:
-                cursor.execute(
-                    "SELECT Activity_ID, Project_ID, Activity_Name, Planned_Start, "
-                    "Planned_Finish, Actual_Start, Actual_Finish, Percent_Complete, "
-                    "Predecessor_ID FROM WBS_ACTIVITIES ORDER BY Activity_ID"
-                )
+            if column_label in DATE_RANGE_COLUMNS:
+                date_from = self._search_date_from.get().strip() if self._search_date_from else ""
+                date_to = self._search_date_to.get().strip() if self._search_date_to else ""
 
-            for row in cursor.fetchall():
-                p_start  = str(row[3])[:10] if row[3] else ""
+                conditions, params = [], []
+                if date_from:
+                    conditions.append(f"{sql_column} >= ?")
+                    params.append(date_from)
+                if date_to:
+                    conditions.append(f"{sql_column} <= ?")
+                    params.append(date_to)
+
+                where_clause = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+                cursor.execute(
+                    "SELECT Activity_ID, Project_ID, Activity_Name, Planned_Start, "
+                    "Planned_Finish, Actual_Start, Actual_Finish, Percent_Complete, "
+                    "Predecessor_ID FROM WBS_ACTIVITIES" + where_clause +
+                    " ORDER BY Activity_ID",
+                    params
+                )
+                keyword_active = bool(conditions)
+
+            else:
+                keyword = self.search_var.get().strip()
+                keyword_active = bool(keyword)
+
+                if keyword:
+                    cursor.execute(
+                        f"SELECT Activity_ID, Project_ID, Activity_Name, Planned_Start, "
+                        f"Planned_Finish, Actual_Start, Actual_Finish, Percent_Complete, "
+                        f"Predecessor_ID FROM WBS_ACTIVITIES "
+                        f"WHERE {sql_column} LIKE ? "
+                        f"ORDER BY Activity_ID",
+                        (f"%{keyword}%",)
+                    )
+                else:
+                    cursor.execute(
+                        "SELECT Activity_ID, Project_ID, Activity_Name, Planned_Start, "
+                        "Planned_Finish, Actual_Start, Actual_Finish, Percent_Complete, "
+                        "Predecessor_ID FROM WBS_ACTIVITIES ORDER BY Activity_ID"
+                    )
+
+            rows = cursor.fetchall()
+            for row in rows:
+                p_start = str(row[3])[:10] if row[3] else ""
                 p_finish = str(row[4])[:10] if row[4] else ""
-                a_start  = str(row[5])[:10] if row[5] else ""
+                a_start = str(row[5])[:10] if row[5] else ""
                 a_finish = str(row[6])[:10] if row[6] else ""
-                pct      = row[7] if row[7] is not None else 0
+                pct = row[7] if row[7] is not None else 0
                 self.tree.insert("", tk.END, values=(
                     row[0], row[1], row[2], p_start, p_finish, a_start, a_finish,
                     pct, row[8] or ""
                 ))
 
             conn.close()
+
+            if keyword_active and not rows:
+                messagebox.showinfo("Search", "No WBS activities matched your search criteria.")
 
         except Exception as exc:
             messagebox.showerror("Database Error", f"Failed to load WBS activities:\n{exc}")
@@ -443,19 +617,19 @@ class WbsActivitiesForm(tk.Frame):
         if not self._validate_inputs(is_add=True):
             return
 
-        activity_id    = self._get_field("Activity_ID *")
-        project_id     = self._project_id_from_field()
-        activity_name  = self._get_field("Activity_Name *")
-        planned_start  = self._none_if_empty(self._get_field("Planned_Start (YYYY-MM-DD)"))
-        planned_finish = self._none_if_empty(self._get_field("Planned_Finish (YYYY-MM-DD)"))
-        actual_start   = self._none_if_empty(self._get_field("Actual_Start (YYYY-MM-DD)"))
-        actual_finish  = self._none_if_empty(self._get_field("Actual_Finish (YYYY-MM-DD)"))
-        pct            = self._get_field("Percent_Complete (0-100)")
-        pct_val        = float(pct) if pct else 0
+        activity_id = self._get_field("Activity_ID *")
+        project_id = self._project_id_from_field()
+        activity_name = self._get_field("Activity_Name *")
+        planned_start = self._none_if_empty(self._get_field("Planned_Start"))
+        planned_finish = self._none_if_empty(self._get_field("Planned_Finish"))
+        actual_start = self._none_if_empty(self._get_field("Actual_Start"))
+        actual_finish = self._none_if_empty(self._get_field("Actual_Finish"))
+        pct = self._get_field("Percent_Complete (0-100)")
+        pct_val = float(pct) if pct else 0
         predecessor_id = self._predecessor_id_from_field()
 
         try:
-            conn   = get_connection()
+            conn = get_connection()
             cursor = conn.cursor()
             cursor.execute(
                 "INSERT INTO WBS_ACTIVITIES (Activity_ID, Project_ID, Activity_Name, "
@@ -480,14 +654,14 @@ class WbsActivitiesForm(tk.Frame):
         if not self._validate_inputs(is_add=False):
             return
 
-        project_id     = self._project_id_from_field()
-        activity_name  = self._get_field("Activity_Name *")
-        planned_start  = self._none_if_empty(self._get_field("Planned_Start (YYYY-MM-DD)"))
-        planned_finish = self._none_if_empty(self._get_field("Planned_Finish (YYYY-MM-DD)"))
-        actual_start   = self._none_if_empty(self._get_field("Actual_Start (YYYY-MM-DD)"))
-        actual_finish  = self._none_if_empty(self._get_field("Actual_Finish (YYYY-MM-DD)"))
-        pct            = self._get_field("Percent_Complete (0-100)")
-        pct_val        = float(pct) if pct else 0
+        project_id = self._project_id_from_field()
+        activity_name = self._get_field("Activity_Name *")
+        planned_start = self._none_if_empty(self._get_field("Planned_Start"))
+        planned_finish = self._none_if_empty(self._get_field("Planned_Finish"))
+        actual_start = self._none_if_empty(self._get_field("Actual_Start"))
+        actual_finish = self._none_if_empty(self._get_field("Actual_Finish"))
+        pct = self._get_field("Percent_Complete (0-100)")
+        pct_val = float(pct) if pct else 0
         predecessor_id = self._predecessor_id_from_field()
 
         if predecessor_id == self._selected_id:
@@ -499,7 +673,7 @@ class WbsActivitiesForm(tk.Frame):
             return
 
         try:
-            conn   = get_connection()
+            conn = get_connection()
             cursor = conn.cursor()
             cursor.execute(
                 "UPDATE WBS_ACTIVITIES SET Project_ID=?, Activity_Name=?, "
@@ -531,7 +705,7 @@ class WbsActivitiesForm(tk.Frame):
             return
 
         try:
-            conn   = get_connection()
+            conn = get_connection()
             cursor = conn.cursor()
             cursor.execute("DELETE FROM WBS_ACTIVITIES WHERE Activity_ID=?",
                            (self._selected_id,))

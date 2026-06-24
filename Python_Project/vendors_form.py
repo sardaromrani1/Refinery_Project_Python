@@ -6,9 +6,9 @@ Full CRUD Tkinter form for the VENDORS table in Refinery_Project.
 Table schema
 ────────────
 CREATE TABLE VENDORS (
-    Vendor_ID          VARCHAR(20)  PRIMARY KEY,
-    Vendor_Name        VARCHAR(150) NOT NULL,
-    Contact            VARCHAR(150),
+    Vendor_ID VARCHAR(20) PRIMARY KEY,
+    Vendor_Name VARCHAR(150) NOT NULL,
+    Contact VARCHAR(150),
     Performance_Rating VARCHAR(20)
 );
 
@@ -18,6 +18,9 @@ Notes
 • Performance_Rating uses a fixed Combobox to keep values consistent.
 • No FK dependencies — this table can be populated independently.
   (MATERIALS references VENDORS, so populate VENDORS before MATERIALS.)
+• No date fields in this table, so search is keyword-only. A "Search by"
+  column dropdown is still provided for UI consistency with other modules
+  (Projects, WBS Activities, Materials) that mix keyword and date-range search.
 """
 
 import tkinter as tk
@@ -27,21 +30,29 @@ from db_connection import get_connection
 
 RATING_OPTIONS = ["Excellent", "Good", "Satisfactory", "Poor", "Under Review"]
 
+# ── Search column options: display label -> actual SQL column name ──────────
+SEARCH_COLUMNS = {
+    "Vendor ID": "Vendor_ID",
+    "Vendor Name": "Vendor_Name",
+    "Contact": "Contact",
+    "Performance Rating": "Performance_Rating",
+}
+
 
 class VendorsForm(tk.Frame):
 
-    BG       = "#1e2327"
+    BG = "#1e2327"
     PANEL_BG = "#252b30"
-    FG       = "#e0e0e0"
-    ACCENT   = "#00b4d8"
-    BTN_BG   = "#00b4d8"
-    BTN_FG   = "#ffffff"
+    FG = "#e0e0e0"
+    ACCENT = "#00b4d8"
+    BTN_BG = "#00b4d8"
+    BTN_FG = "#ffffff"
     ENTRY_BG = "#2e3540"
-    SEL_BG   = "#00b4d8"
+    SEL_BG = "#00b4d8"
 
     def __init__(self, parent, *args, **kwargs):
         super().__init__(parent, bg=self.BG, *args, **kwargs)
-        self._selected_id = None        # Vendor_ID of currently selected row
+        self._selected_id = None # Vendor_ID of currently selected row
         self._build_ui()
         self.load_vendors()
 
@@ -55,11 +66,26 @@ class VendorsForm(tk.Frame):
             font=("Segoe UI", 16, "bold")
         ).pack(pady=(18, 6))
 
-        # Search bar
+        # ── Search bar (column selector + keyword) ────────────────────────────
         search_frame = tk.Frame(self, bg=self.BG)
         search_frame.pack(fill=tk.X, padx=20, pady=(0, 6))
-        tk.Label(search_frame, text="Search:", bg=self.BG, fg=self.FG,
+
+        tk.Label(search_frame, text="Search by:", bg=self.BG, fg=self.FG,
                  font=("Segoe UI", 10)).pack(side=tk.LEFT, padx=(0, 6))
+
+        self.search_column_var = tk.StringVar(value="Vendor Name")
+        search_column_combo = ttk.Combobox(
+            search_frame, textvariable=self.search_column_var,
+            values=list(SEARCH_COLUMNS.keys()), state="readonly",
+            font=("Segoe UI", 10), width=16
+        )
+        search_column_combo.pack(side=tk.LEFT, padx=(0, 10))
+        # Re-run search whenever the chosen column changes
+        search_column_combo.bind("<<ComboboxSelected>>", lambda _e: self.load_vendors())
+
+        tk.Label(search_frame, text="Keyword:", bg=self.BG, fg=self.FG,
+                 font=("Segoe UI", 10)).pack(side=tk.LEFT, padx=(0, 6))
+
         self.search_var = tk.StringVar()
         self.search_var.trace_add("write", lambda *_: self.load_vendors())
         tk.Entry(
@@ -76,9 +102,9 @@ class VendorsForm(tk.Frame):
         panel.pack(fill=tk.X, padx=20, pady=6)
 
         fields = [
-            ("Vendor ID *",        "entry"),
-            ("Vendor Name *",      "entry"),
-            ("Contact",            "entry"),
+            ("Vendor ID *", "entry"),
+            ("Vendor Name *", "entry"),
+            ("Contact", "entry"),
             ("Performance Rating", "combo"),
         ]
 
@@ -107,11 +133,11 @@ class VendorsForm(tk.Frame):
         btn_frame = tk.Frame(self, bg=self.BG)
         btn_frame.pack(pady=8)
         for text, cmd in [
-            ("➕ Add",    self.add_vendor),
-            ("✏️ Update",  self.update_vendor),
-            ("🗑️ Delete",  self.delete_vendor),
+            ("➕ Add", self.add_vendor),
+            ("✏️ Update", self.update_vendor),
+            ("🗑️ Delete", self.delete_vendor),
             ("🔄 Refresh", self.load_vendors),
-            ("✖ Clear",   self.clear_fields),
+            ("✖ Clear", self.clear_fields),
         ]:
             tk.Button(
                 btn_frame, text=text, command=cmd,
@@ -190,9 +216,9 @@ class VendorsForm(tk.Frame):
         self._selected_id = v[0]
 
         mapping = {
-            "Vendor ID *":        v[0],
-            "Vendor Name *":      v[1],
-            "Contact":            v[2],
+            "Vendor ID *": v[0],
+            "Vendor Name *": v[1],
+            "Contact": v[2],
             "Performance Rating": v[3],
         }
         for lbl, val in mapping.items():
@@ -212,28 +238,32 @@ class VendorsForm(tk.Frame):
 
     # ── CRUD ──────────────────────────────────────────────────────────────────
     def load_vendors(self, *_):
+        """Read vendors, filtered by the selected search column, into the treeview."""
         for row in self.tree.get_children():
             self.tree.delete(row)
 
         keyword = self.search_var.get().strip()
+        column_label = self.search_column_var.get()
+        sql_column = SEARCH_COLUMNS.get(column_label, "Vendor_Name")
+
         try:
-            conn   = get_connection()
+            conn = get_connection()
             cursor = conn.cursor()
             if keyword:
                 cursor.execute(
-                    "SELECT Vendor_ID, Vendor_Name, Contact, Performance_Rating "
-                    "FROM VENDORS "
-                    "WHERE Vendor_ID LIKE ? OR Vendor_Name LIKE ? "
-                    "   OR Contact LIKE ? OR Performance_Rating LIKE ? "
-                    "ORDER BY Vendor_ID",
-                    (f"%{keyword}%",) * 4
+                    f"SELECT Vendor_ID, Vendor_Name, Contact, Performance_Rating "
+                    f"FROM VENDORS "
+                    f"WHERE {sql_column} LIKE ? "
+                    f"ORDER BY Vendor_ID",
+                    (f"%{keyword}%",)
                 )
             else:
                 cursor.execute(
                     "SELECT Vendor_ID, Vendor_Name, Contact, Performance_Rating "
                     "FROM VENDORS ORDER BY Vendor_ID"
                 )
-            for row in cursor.fetchall():
+            rows = cursor.fetchall()
+            for row in rows:
                 self.tree.insert("", tk.END, values=(
                     row[0] or "",
                     row[1] or "",
@@ -241,6 +271,9 @@ class VendorsForm(tk.Frame):
                     row[3] or "",
                 ))
             conn.close()
+
+            if keyword and not rows:
+                messagebox.showinfo("Search", "No vendors matched your search criteria.")
 
         except Exception as exc:
             messagebox.showerror("Database Error",
@@ -250,13 +283,13 @@ class VendorsForm(tk.Frame):
         if not self._validate_inputs():
             return
 
-        ven_id  = self._get("Vendor ID *")
-        name    = self._get("Vendor Name *")
+        ven_id = self._get("Vendor ID *")
+        name = self._get("Vendor Name *")
         contact = self._none_if_empty(self._get("Contact"))
-        rating  = self._get("Performance Rating")
+        rating = self._get("Performance Rating")
 
         try:
-            conn   = get_connection()
+            conn = get_connection()
             cursor = conn.cursor()
             cursor.execute(
                 "INSERT INTO VENDORS "
@@ -282,16 +315,16 @@ class VendorsForm(tk.Frame):
         if not self._validate_inputs():
             return
 
-        name    = self._get("Vendor Name *")
+        name = self._get("Vendor Name *")
         contact = self._none_if_empty(self._get("Contact"))
-        rating  = self._get("Performance Rating")
+        rating = self._get("Performance Rating")
 
         if not messagebox.askyesno("Confirm Update",
                                    f"Update Vendor ID '{self._selected_id}'?"):
             return
 
         try:
-            conn   = get_connection()
+            conn = get_connection()
             cursor = conn.cursor()
             cursor.execute(
                 "UPDATE VENDORS "
@@ -323,7 +356,7 @@ class VendorsForm(tk.Frame):
             return
 
         try:
-            conn   = get_connection()
+            conn = get_connection()
             cursor = conn.cursor()
             cursor.execute("DELETE FROM VENDORS WHERE Vendor_ID=?",
                            (self._selected_id,))
@@ -342,7 +375,7 @@ class VendorsForm(tk.Frame):
 if __name__ == "__main__":
     root = tk.Tk()
     root.title("Refinery Project – Vendors Form")
-    root.geometry("900x580")
+    root.geometry("950x600")
     root.configure(bg="#1e2327")
     VendorsForm(root)
     root.mainloop()

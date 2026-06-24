@@ -6,9 +6,9 @@ Full CRUD Tkinter form for the CONTRACTORS table in Refinery_Project.
 Table schema
 ────────────
 CREATE TABLE CONTRACTORS (
-    Contractor_ID      VARCHAR(20)  PRIMARY KEY,
-    Contractor_Name    VARCHAR(150) NOT NULL,
-    Contract_Number    VARCHAR(50),
+    Contractor_ID VARCHAR(20) PRIMARY KEY,
+    Contractor_Name VARCHAR(150) NOT NULL,
+    Contract_Number VARCHAR(50),
     Performance_Rating VARCHAR(20)
 );
 
@@ -17,6 +17,9 @@ Notes
 • Contractor_ID is a user-supplied VARCHAR primary key (not auto-generated).
 • Performance_Rating uses a fixed Combobox to prevent free-text inconsistency.
 • No FK dependencies — this table can be populated independently.
+• No date fields in this table, so search is keyword-only. A "Search by"
+  column dropdown is still provided for UI consistency with other modules
+  (Projects, WBS Activities, Materials) that mix keyword and date-range search.
 """
 
 import tkinter as tk
@@ -26,21 +29,29 @@ from db_connection import get_connection
 
 RATING_OPTIONS = ["Excellent", "Good", "Satisfactory", "Poor", "Under Review"]
 
+# ── Search column options: display label -> actual SQL column name ──────────
+SEARCH_COLUMNS = {
+    "Contractor ID": "Contractor_ID",
+    "Contractor Name": "Contractor_Name",
+    "Contract Number": "Contract_Number",
+    "Performance Rating": "Performance_Rating",
+}
+
 
 class ContractorsForm(tk.Frame):
 
-    BG       = "#1e2327"
+    BG = "#1e2327"
     PANEL_BG = "#252b30"
-    FG       = "#e0e0e0"
-    ACCENT   = "#00b4d8"
-    BTN_BG   = "#00b4d8"
-    BTN_FG   = "#ffffff"
+    FG = "#e0e0e0"
+    ACCENT = "#00b4d8"
+    BTN_BG = "#00b4d8"
+    BTN_FG = "#ffffff"
     ENTRY_BG = "#2e3540"
-    SEL_BG   = "#00b4d8"
+    SEL_BG = "#00b4d8"
 
     def __init__(self, parent, *args, **kwargs):
         super().__init__(parent, bg=self.BG, *args, **kwargs)
-        self._selected_id = None        # Contractor_ID of currently selected row
+        self._selected_id = None # Contractor_ID of currently selected row
         self._build_ui()
         self.load_contractors()
 
@@ -54,11 +65,26 @@ class ContractorsForm(tk.Frame):
             font=("Segoe UI", 16, "bold")
         ).pack(pady=(18, 6))
 
-        # Search bar
+        # ── Search bar (column selector + keyword) ────────────────────────────
         search_frame = tk.Frame(self, bg=self.BG)
         search_frame.pack(fill=tk.X, padx=20, pady=(0, 6))
-        tk.Label(search_frame, text="Search:", bg=self.BG, fg=self.FG,
+
+        tk.Label(search_frame, text="Search by:", bg=self.BG, fg=self.FG,
                  font=("Segoe UI", 10)).pack(side=tk.LEFT, padx=(0, 6))
+
+        self.search_column_var = tk.StringVar(value="Contractor Name")
+        search_column_combo = ttk.Combobox(
+            search_frame, textvariable=self.search_column_var,
+            values=list(SEARCH_COLUMNS.keys()), state="readonly",
+            font=("Segoe UI", 10), width=16
+        )
+        search_column_combo.pack(side=tk.LEFT, padx=(0, 10))
+        # Re-run search whenever the chosen column changes
+        search_column_combo.bind("<<ComboboxSelected>>", lambda _e: self.load_contractors())
+
+        tk.Label(search_frame, text="Keyword:", bg=self.BG, fg=self.FG,
+                 font=("Segoe UI", 10)).pack(side=tk.LEFT, padx=(0, 6))
+
         self.search_var = tk.StringVar()
         self.search_var.trace_add("write", lambda *_: self.load_contractors())
         tk.Entry(
@@ -75,9 +101,9 @@ class ContractorsForm(tk.Frame):
         panel.pack(fill=tk.X, padx=20, pady=6)
 
         fields = [
-            ("Contractor ID *",   "entry"),
+            ("Contractor ID *", "entry"),
             ("Contractor Name *", "entry"),
-            ("Contract Number",   "entry"),
+            ("Contract Number", "entry"),
             ("Performance Rating","combo"),
         ]
 
@@ -106,11 +132,11 @@ class ContractorsForm(tk.Frame):
         btn_frame = tk.Frame(self, bg=self.BG)
         btn_frame.pack(pady=8)
         for text, cmd in [
-            ("➕ Add",    self.add_contractor),
-            ("✏️ Update",  self.update_contractor),
-            ("🗑️ Delete",  self.delete_contractor),
+            ("➕ Add", self.add_contractor),
+            ("✏️ Update", self.update_contractor),
+            ("🗑️ Delete", self.delete_contractor),
             ("🔄 Refresh", self.load_contractors),
-            ("✖ Clear",   self.clear_fields),
+            ("✖ Clear", self.clear_fields),
         ]:
             tk.Button(
                 btn_frame, text=text, command=cmd,
@@ -190,9 +216,9 @@ class ContractorsForm(tk.Frame):
         self._selected_id = v[0]
 
         mapping = {
-            "Contractor ID *":    v[0],
-            "Contractor Name *":  v[1],
-            "Contract Number":    v[2],
+            "Contractor ID *": v[0],
+            "Contractor Name *": v[1],
+            "Contract Number": v[2],
             "Performance Rating": v[3],
         }
         for lbl, val in mapping.items():
@@ -212,28 +238,32 @@ class ContractorsForm(tk.Frame):
 
     # ── CRUD ──────────────────────────────────────────────────────────────────
     def load_contractors(self, *_):
+        """Read contractors, filtered by the selected search column, into the treeview."""
         for row in self.tree.get_children():
             self.tree.delete(row)
 
         keyword = self.search_var.get().strip()
+        column_label = self.search_column_var.get()
+        sql_column = SEARCH_COLUMNS.get(column_label, "Contractor_Name")
+
         try:
-            conn   = get_connection()
+            conn = get_connection()
             cursor = conn.cursor()
             if keyword:
                 cursor.execute(
-                    "SELECT Contractor_ID, Contractor_Name, Contract_Number, "
-                    "Performance_Rating FROM CONTRACTORS "
-                    "WHERE Contractor_ID LIKE ? OR Contractor_Name LIKE ? "
-                    "   OR Contract_Number LIKE ? OR Performance_Rating LIKE ? "
-                    "ORDER BY Contractor_ID",
-                    (f"%{keyword}%",) * 4
+                    f"SELECT Contractor_ID, Contractor_Name, Contract_Number, "
+                    f"Performance_Rating FROM CONTRACTORS "
+                    f"WHERE {sql_column} LIKE ? "
+                    f"ORDER BY Contractor_ID",
+                    (f"%{keyword}%",)
                 )
             else:
                 cursor.execute(
                     "SELECT Contractor_ID, Contractor_Name, Contract_Number, "
                     "Performance_Rating FROM CONTRACTORS ORDER BY Contractor_ID"
                 )
-            for row in cursor.fetchall():
+            rows = cursor.fetchall()
+            for row in rows:
                 self.tree.insert("", tk.END, values=(
                     row[0] or "",
                     row[1] or "",
@@ -241,6 +271,9 @@ class ContractorsForm(tk.Frame):
                     row[3] or "",
                 ))
             conn.close()
+
+            if keyword and not rows:
+                messagebox.showinfo("Search", "No contractors matched your search criteria.")
 
         except Exception as exc:
             messagebox.showerror("Database Error",
@@ -250,13 +283,13 @@ class ContractorsForm(tk.Frame):
         if not self._validate_inputs():
             return
 
-        con_id  = self._get("Contractor ID *")
-        name    = self._get("Contractor Name *")
+        con_id = self._get("Contractor ID *")
+        name = self._get("Contractor Name *")
         con_num = self._none_if_empty(self._get("Contract Number"))
-        rating  = self._get("Performance Rating")
+        rating = self._get("Performance Rating")
 
         try:
-            conn   = get_connection()
+            conn = get_connection()
             cursor = conn.cursor()
             cursor.execute(
                 "INSERT INTO CONTRACTORS "
@@ -283,16 +316,16 @@ class ContractorsForm(tk.Frame):
         if not self._validate_inputs():
             return
 
-        name    = self._get("Contractor Name *")
+        name = self._get("Contractor Name *")
         con_num = self._none_if_empty(self._get("Contract Number"))
-        rating  = self._get("Performance Rating")
+        rating = self._get("Performance Rating")
 
         if not messagebox.askyesno("Confirm Update",
                                    f"Update Contractor ID '{self._selected_id}'?"):
             return
 
         try:
-            conn   = get_connection()
+            conn = get_connection()
             cursor = conn.cursor()
             cursor.execute(
                 "UPDATE CONTRACTORS "
@@ -324,7 +357,7 @@ class ContractorsForm(tk.Frame):
             return
 
         try:
-            conn   = get_connection()
+            conn = get_connection()
             cursor = conn.cursor()
             cursor.execute("DELETE FROM CONTRACTORS WHERE Contractor_ID=?",
                            (self._selected_id,))
@@ -343,7 +376,7 @@ class ContractorsForm(tk.Frame):
 if __name__ == "__main__":
     root = tk.Tk()
     root.title("Refinery Project – Contractors Form")
-    root.geometry("900x580")
+    root.geometry("950x600")
     root.configure(bg="#1e2327")
     ContractorsForm(root)
     root.mainloop()
